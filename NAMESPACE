@@ -28,6 +28,7 @@ S3method(inspectDT, rules)
 S3method(inspectDT, itemsets)
 
 export("ruleExplorer")
+export("groupExplorer")
 export("saveAsGraph")
 
 ## Deprecated
