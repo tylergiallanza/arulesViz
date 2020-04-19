@@ -20,7 +20,7 @@
 # FIXME: Implement max
 # FIXME: size and color...
 
-visNetwork_arules <- function(x, measure = "support", shading = "lift", 
+visNetwork_arules_group <- function(x, groups, measure = "support", shading = "lift", 
   control=NULL, ...) {
   
   if(class(x) != "rules") stop("Only implemented for rules!")
@@ -28,7 +28,6 @@ visNetwork_arules <- function(x, measure = "support", shading = "lift",
   control <- c(control, list(...))  
   
   control <- .get_parameters(control, list(
-    #main = paste("Graph for", length(x), "rules"),
     #nodeColors = .nodeColors(
     #  if(!is.null(control$alpha)) control$alpha else .5),
     itemCol = hcl(h = 260),
@@ -54,13 +53,6 @@ visNetwork_arules <- function(x, measure = "support", shading = "lift",
     #plot = TRUE
   ))
   
-  if(length(x) > control$max) {
-    warning("Too many rules supplied. Only plotting the best ", 
-      control$max, " rules using ", shading, 
-      " (change control parameter max if needed)", call. = FALSE)
-    x <- tail(x, n = control$max, by = shading, decreasing = FALSE)
-  }
-  
   itemNodes <- which(itemFrequency(items(generatingItemsets(x)), 
     type="absolute") >0)
   
@@ -70,8 +62,7 @@ visNetwork_arules <- function(x, measure = "support", shading = "lift",
   itemNodes <- unique(c(unlist(lhs), unlist(rhs)))
   ruleNodes <- paste("r", 1:length(x), sep='')
   
-  nodeLabels <- c(itemLabels(x)[itemNodes], paste("rule", 1:length(ruleNodes)))
-  #nodeLabels <- c(itemLabels(x)[itemNodes], rep("", length(ruleNodes)))
+  nodeLabels <- c(itemLabels(x)[itemNodes], paste("rule", 1:length(ruleNodes))) #TODO: change node name
   
   allNodes <- factor(c(itemNodes, ruleNodes), levels = c(itemNodes, ruleNodes))
   nodeType <- c(rep("item", length(itemNodes)), rep("rule", length(ruleNodes)))
@@ -92,18 +83,56 @@ visNetwork_arules <- function(x, measure = "support", shading = "lift",
   
   title <- c(itemLabels(x)[itemNodes], titleRules)
   
-  s <- quality(x)[[measure]]
+  s <- quality(x)[[measure]] #TODO: change node size
   size <- rep(1, length(nodeType))
   size[nodeType == "rule"] <- map(s, c(1, 100)) 
   
   if(!is.na(shading)) {
-    s <- quality(x)[[shading]]
-    color <- c(rep(control$itemCol[1], length(itemNodes)),
-      .col_picker(map(s, c(0.9,0.1)), control$nodeCol)) 
-        ## alpha not supported alpha=control$alpha)) 
+    colors <- list(weight_group_1=0,weight_group_2=50,weight_group_3=100,weight_group_4=200,
+                  weight_group_5=300,weight_group_6=360,weight_group_7=-50,weight_group_8=-100,
+                  weight_group_9=-150,weight_group_10=-200)
+    
+    colors <- lapply(colors, function(y) sequential_hcl(n=8,h=y,c=c(86,NA,NA),l=c(50,100),
+                                                        power=1.3,rev=T,register=))
+    
+    rule_quality <- quality(x)
+    rule_quality[['max_group']] <- groups[apply(quality(x)[groups], 1, which.max)] #make this disc max
+    rule_quality[['num_groups']] <- apply(quality(x)[groups], 1, function(x) sum(x>0))
+    rule_quality[['color']] <- 0
+    current_rules <- subset(x, subset=quality(x)$confidence > 1)
+    lhs_overlap <- c()
+    rhs_overlap <- c()
+    for(group in groups) {
+      group_rules <- subset(x, subset=quality(x)[[group]] > 0 & rule_quality[['max_group']] == group)
+      if( length(group_rules) == 0) {
+        next
+      }
+      group_indices <- as.numeric(rownames(quality(group_rules)))
+      color_indices <- as.integer(cut(quality(group_rules)[[group]],7))+1
+      group_colors <- colors[[group]][color_indices]
+      rule_quality[as.character(group_indices),'color'] <- group_colors
+      
+      lhs_overlap <- c(lhs_overlap,overlapping_lhs(current_rules,group_rules))
+      rhs_overlap <- c(rhs_overlap,overlapping_rhs(current_rules,group_rules))
+      current_rules <- arules::union(current_rules,group_rules)
+      #rule_quality[['color']] <- group_colors
+    }
+    node_colors <- rule_quality$color
+    node_shapes <- c('circle',rep('diamond',9))[rule_quality$num_groups]
+    
+    
+    
+    item_node_colors <- rep(hcl(h=260), length(itemNodes))
+    names(item_node_colors) <- itemLabels(x)[itemNodes]
+    overlapping_nodes <- c(lhs_overlap,rhs_overlap)
+    item_node_colors[overlapping_nodes] <- rgb(1,0,0)
+    
+    
+    color <- c(item_node_colors,node_colors)
+    node_shapes <- c(rep("box", length(itemNodes)),node_shapes)
+      #.col_picker(map(s, c(0.9,0.1)), control$nodeCol)) 
   } else v.color <- c(rep(control$itemCol[1], length(itemNodes)),
     .col_picker(rep(.5, length(x)), control$nodeCol)) 
-      ## alpha=control$alpha))
 
   nodes <- data.frame(
     id = as.integer(allNodes), 
@@ -112,15 +141,13 @@ visNetwork_arules <- function(x, measure = "support", shading = "lift",
     value = size,
     color = color,
     title = title,
-    shape = ifelse(nodeType == "rule", "circle", "box")
+    shape = node_shapes
   )
   
   edges <- data.frame(
     from = c(from_lhs, from_rhs), 
     to = c(to_lhs, to_rhs), 
     arrows = "to") 
-    #,
-    #color = control$edgeCol)
   
   visNetwork(nodes = nodes, edges = edges) %>% 
     visNodes(scaling = list(label = list(enabled = TRUE))) %>%

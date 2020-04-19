@@ -20,7 +20,11 @@
 #                 https://github.com/brooksandrew/Rsenal
 #
 
-ruleExplorer <- function(x, parameter = NULL) {
+find_rules_per_transaction <- function(rules,transactions) {
+  sa <- is.subset(lhs(rules),transactions)
+  Matrix::t(sa)
+}
+groupExplorer <- function(classifier, trans, parameter = NULL) {
   
   if (!requireNamespace("shiny", quietly = TRUE)) {
     stop("Package shiny is required to run this method.", call. = FALSE)
@@ -28,8 +32,13 @@ ruleExplorer <- function(x, parameter = NULL) {
   roundUp <- function(x,digits = 3) round(x+.5*10^-digits, digits)
   roundDown <- function(x,digits = 3) round(x-.5*10^-digits, digits)
   
+  classifier$first_weights <- classifier$weights$w1
+  classifier$second_weights <- classifier$weights$w2
+  
   ### dataset can be rules or transactions
-  dataset <- x
+  colnames(classifier$second_weights) <- classifier$class_names
+  dataset <- add_rule_groups(classifier)
+  trans <- normalized_group_weights(classifier,trans)
   aparameter <- as(parameter,'APparameter')
   supp <- aparameter@support
   conf <- aparameter@confidence
@@ -44,6 +53,7 @@ ruleExplorer <- function(x, parameter = NULL) {
   xIndexCached <- "support"
   yIndexCached <- "confidence"
   zIndexCached <- "lift"
+  nodeSizeCached <- "confidence"
   
   #logOutput <- shiny::reactiveVal('Output log')
  
@@ -61,6 +71,8 @@ ruleExplorer <- function(x, parameter = NULL) {
     maxConf <- roundUp(max(quality(dataset)$confidence), 3)
     minLift <- floor(min(quality(dataset)$lift))
     maxLift <- ceiling(max(quality(dataset)$lift))
+    groupLabels <- colnames(quality(dataset))[which(startsWith(colnames(quality(dataset)),'weight_group_'))]
+    rownames(classifier$second_weights) <- groupLabels
     
     supp <- minSupp
     conf <- minConf
@@ -74,6 +86,7 @@ ruleExplorer <- function(x, parameter = NULL) {
     minLift <- 0
     maxLift <- 25
     lift <- 0
+    groupLabels <- c('')
     
   }
   
@@ -85,11 +98,15 @@ ruleExplorer <- function(x, parameter = NULL) {
       shiny::sidebarPanel(
         
         shiny::htmlOutput('numRulesOutput'),
+        shiny::HTML('<b>Select groups:</b>'),
+        shiny::br(),
+        shiny::uiOutput("choose_groups"), 
         shiny::br(),
         shiny::uiOutput("kSelectInput"),
         shiny::uiOutput("xAxisSelectInput"),
         shiny::uiOutput("yAxisSelectInput"),
         shiny::uiOutput("cAxisSelectInput"),
+        shiny::uiOutput("nodeSizeSelectInput"),
         shiny::br(),
         shiny::sliderInput("supp", "Minimum Support:", min = minSupp, max = maxSupp, value = supp , step = (maxSupp-minSupp)/10000, sep =""),
         shiny::sliderInput("conf", "Minimum Confidence:", min = minConf, max = maxConf, value = conf , step =  (maxConf-minConf)/1000, sep = ""), 
@@ -118,7 +135,12 @@ ruleExplorer <- function(x, parameter = NULL) {
           shiny::tabPanel('Scatter', value='scatter', plotlyOutput("scatterPlot", width='100%', height='100%')),
           shiny::tabPanel('Matrix', value='matrix', plotlyOutput("matrixPlot", width='100%', height='100%')),
           shiny::tabPanel('Grouped', value='grouped', shiny::plotOutput("groupedPlot", width='100%', height='100%')),
-          shiny::tabPanel('Graph', value='graph', visNetworkOutput("graphPlot", width='100%', height='800px'))
+          shiny::tabPanel('Graph', value='graph', visNetworkOutput("graphPlot", width='100%', height='800px')),
+          shiny::tabPanel('Group Graph', value='group_graph', visNetworkOutput("groupGraphPlot", width='100%', height='800px')),
+          shiny::tabPanel('Group Items', value='items_graph', plotlyOutput("itemsGraphPlot", width='100%', height='800px')),
+          shiny::tabPanel('Group Class Items', value='class_items_graph', plotlyOutput("classItemsGraphPlot", width='100%', height='800px')),
+          shiny::tabPanel('Group Transactions', value='trans_table', shiny::dataTableOutput("transDataTable")),
+          shiny::tabPanel('Network Graph', value='network_graph', visNetworkOutput("networkGraphPlot", width='100%', height='800px'))
         )
       )
     ) 
@@ -154,9 +176,18 @@ ruleExplorer <- function(x, parameter = NULL) {
           shiny::selectInput("cAxis","Shading:", colnames(quality(rules())), selected=zIndexCached)
         }
       })
+      output$nodeSizeSelectInput <- shiny::renderUI({
+        if(input$mytab %in% c('group_graph')) {
+          shiny::selectInput("node_size","Node Size:", colnames(quality(rules())), selected=nodeSizeCached)
+        }
+      })
       
       output$choose_columns <- shiny::renderUI({
         shiny::selectizeInput('cols', NULL, itemLabels, multiple = TRUE)
+      })
+      
+      output$choose_groups <- shiny::renderUI({
+        shiny::selectizeInput('groups', NULL, groupLabels, multiple = TRUE)
       })
       
       
@@ -182,6 +213,7 @@ ruleExplorer <- function(x, parameter = NULL) {
       
       if(is(dataset, "rules")) {
         cachedRules <- dataset
+        cachedGroups <- c("")
         cachedSupp <<- info(dataset)$support
         cachedConf <<- info(dataset)$confidence
         cachedLift <<- min(quality(dataset)$lift)
@@ -214,6 +246,7 @@ ruleExplorer <- function(x, parameter = NULL) {
         cachedLift <<- input$lift
         cachedMinL <<- input$minL
         cachedMaxL <<- input$maxL
+        cachedGroups <<- input$groups
       })
      
       ### handle warning for too low support
@@ -260,6 +293,14 @@ ruleExplorer <- function(x, parameter = NULL) {
         }
         
         ar <- cachedRules
+        
+        if(length(input$groups) > 0 && input$groups != cachedGroups) {
+          temp_ar <- subset(ar, subset = support > 1)
+          for(group_name in input$groups) {
+            temp_ar <- union(temp_ar,subset(ar, subset = quality(ar)[[group_name]] > 0))
+          }
+          ar <- temp_ar
+        }
         
         if(input$supp > cachedSupp) {
           ar <- subset(ar, subset = support > input$supp)
@@ -327,6 +368,7 @@ ruleExplorer <- function(x, parameter = NULL) {
       shiny::observe({ shiny::req(input$xAxis); xIndexCached <<- input$xAxis })
       shiny::observe({ shiny::req(input$yAxis); yIndexCached <<- input$yAxis })
       shiny::observe({ shiny::req(input$cAxis); zIndexCached <<- input$cAxis })
+      shiny::observe({ shiny::req(input$node_size); nodeSizeCached <<- input$node_size })
       
       
       # Present errors nicely to the user
@@ -352,6 +394,25 @@ ruleExplorer <- function(x, parameter = NULL) {
         handleErrors()
         
         plt <- plot(rules(), method='graph', shading = input$cAxis, engine='htmlwidget')
+        #plt <- visNetwork_arules_group(rules())
+        
+        plt$sizingPolicy <- htmlwidgets::sizingPolicy(
+          viewer.paneHeight=1000,
+          browser.defaultHeight=1000,
+          knitr.defaultHeight=1000,
+          defaultHeight=1000,defaultWidth=1000,
+          browser.fill=TRUE
+        )
+        plt$height <- 1000
+        plt$x$height <- 1000
+        plt
+      })
+      output$groupGraphPlot <- renderVisNetwork({
+        shiny::req(input$cAxis)
+        handleErrors()
+        
+        #plt <- plot(rules(), method='graph', shading = input$cAxis, engine='htmlwidget')
+        plt <- visNetwork_arules_group(rules(),input$groups, measure=input$node_size)
         
         plt$sizingPolicy <- htmlwidgets::sizingPolicy(
           viewer.paneHeight=1000,
@@ -365,6 +426,24 @@ ruleExplorer <- function(x, parameter = NULL) {
         plt
       })
       
+      output$networkGraphPlot <- renderVisNetwork({
+        shiny::req(input$cAxis)
+        handleErrors()
+        
+        #plt <- plot(rules(), method='graph', shading = input$cAxis, engine='htmlwidget')
+        plt <- visNetwork_arules_network(classifier,rules(),groupLabels)
+        
+        plt$sizingPolicy <- htmlwidgets::sizingPolicy(
+          viewer.paneHeight=1000,
+          browser.defaultHeight=1000,
+          knitr.defaultHeight=1000,
+          defaultHeight=1000,defaultWidth=1000,
+          browser.fill=TRUE
+        )
+        plt$height <- 1000
+        plt$x$height <- 1000
+        plt
+      })
       
       ## Scatter Plot ##########################
       output$scatterPlot <- renderPlotly({
@@ -374,6 +453,25 @@ ruleExplorer <- function(x, parameter = NULL) {
         .plotly_arules(rules(), method = 'scatterplot',
           measure=c(input$xAxis, input$yAxis), shading = input$cAxis)
       })
+      
+      output$itemsGraphPlot <- renderPlotly({
+        item_weights <- melt(group_itemset_stats(rules(), input$groups, classifier), id.vars="items")
+        plot_ly(item_weights, x=~items, y=~value, color=~variable, type='bar') %>% 
+          layout(
+            yaxis=list(title='Weight (scaled)'),
+            xaxis=list(title="Items"),
+            barmode='stack')
+      })
+      
+      output$classItemsGraphPlot <- renderPlotly({
+        item_weights <- melt(group_itemset_stats(rules(), input$groups, classifier, type = 'class'), id.vars="items")
+        plot_ly(item_weights, x=~items, y=~value, color=~variable, type='bar') %>% 
+          layout(
+            yaxis=list(title='Weight (scaled)'),
+            xaxis=list(title="Items"),
+            barmode='stack')
+      })
+      
       
       
       ## Parallel Coordinates Plot ###################
@@ -398,7 +496,17 @@ ruleExplorer <- function(x, parameter = NULL) {
         
         x <- rules()
         data.frame(LHS = labels(lhs(x)), RHS = labels(rhs(x)), quality(x))
-      }, options = list(filter = "top", rownames = paste0('[', 1:length(x), ']'))
+      }, options = list(filter = "top", rownames = paste0('[', 1:length(rules()), ']'))
+      )
+      
+      output$transDataTable <- shiny::renderDataTable({
+        handleErrors()
+        
+        
+        x <- trans
+        #data.frame(LHS = labels(lhs(x)), RHS = labels(rhs(x)), quality(x))
+        x
+      }, options = list(filter = "top", rownames = paste0('[', 1:length(rules()), ']'))
       )
       
       ## Download data to csv ########################
